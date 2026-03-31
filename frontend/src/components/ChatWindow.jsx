@@ -26,10 +26,21 @@ export default function ChatWindow() {
     setLoading(true)
 
     const assistantId = Date.now() + 1
-    setMessages(prev => [...prev, { id: assistantId, type: 'assistant', content: '', thinking: true }])
+    // 初始占位：显示思考中状态
+    setMessages(prev => [...prev, {
+      id: assistantId,
+      type: 'assistant',
+      content: '',
+      thinking: true,
+      searchingSources: [],   // 实时累积的来源
+      searchingCount: 0,      // 当前搜索数量
+      thoughtSummary: '',     // 分析总结
+      researchData: null,
+      retryCount: 0,
+    }])
 
     try {
-      const response = await fetch('/api/chat/stream', {
+      const response = await fetch('/api/chat/deep', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, conversation_id: conversationId })
@@ -50,19 +61,58 @@ export default function ChatWindow() {
           if (!line.startsWith('data: ')) continue
           try {
             const data = JSON.parse(line.slice(6))
-            if (data.error) {
+
+            if (data.type === 'error') {
               setMessages(prev => prev.map(m =>
-                m.id === assistantId ? { ...m, content: `错误: ${data.error}`, error: true, thinking: false } : m
+                m.id === assistantId
+                  ? { ...m, content: `错误: ${data.content}`, error: true, thinking: false }
+                  : m
               ))
               return
             }
-            if (data.chunk) {
-              fullContent += data.chunk
+
+            // 每找到一个来源，实时追加
+            if (data.type === 'searching') {
               setMessages(prev => prev.map(m =>
-                m.id === assistantId ? { ...m, content: fullContent, thinking: false } : m
+                m.id === assistantId ? {
+                  ...m,
+                  searchingCount: data.count,
+                  searchingSources: [...(m.searchingSources || []), data.source],
+                  thinking: true,
+                } : m
               ))
             }
-            if (data.done) setConversationId(conversationId || 'default')
+
+            // 搜索完成后的分析总结
+            if (data.type === 'thought_summary') {
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId
+                  ? { ...m, thoughtSummary: data.content }
+                  : m
+              ))
+            }
+
+            if (data.type === 'research') {
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId ? { ...m, researchData: data.data } : m
+              ))
+            }
+
+            if (data.type === 'chunk') {
+              fullContent += data.content
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId
+                  ? { ...m, content: fullContent, thinking: false }
+                  : m
+              ))
+            }
+
+            if (data.type === 'done') {
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId ? { ...m, thinking: false } : m
+              ))
+              setConversationId(conversationId || 'default')
+            }
           } catch {}
         }
       }
@@ -89,7 +139,7 @@ export default function ChatWindow() {
       <div className="px-6 pb-4 pt-3" style={{ borderTop: `1px solid ${theme.border}` }}>
         <InputBox onSendMessage={handleSendMessage} disabled={loading} />
         <div className="text-center mt-2 text-xs" style={{ color: theme.textFaint }}>
-          POWERED BY QWEN-MAX · 深度搜索模式已开启
+          POWERED BY QWEN-TURBO · 深度搜索模式已开启
         </div>
       </div>
     </div>

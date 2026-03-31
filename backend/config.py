@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     
     # Tongyi API Configuration
     dashscope_api_key: str = os.getenv("DASHSCOPE_API_KEY", "")
-    model_name: str = "qwen-max"
+    model_name: str = "qwen-turbo"
+
+    # Tavily Search API
+    tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
     
     # Request Configuration
     request_timeout: int = 30
