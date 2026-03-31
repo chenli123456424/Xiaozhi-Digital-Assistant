@@ -6,10 +6,24 @@
   @apply box-border;
 }
 
-html, body {
-  @apply h-full w-full;
+html, body, #root {
+  @apply h-full w-full m-0 p-0;
 }
 
 body {
-  @apply bg-gradient-to-br from-blue-50 to-indigo-100;
+  background-color: #0d1117;
+  color: #e6edf3;
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 2px;
 }
