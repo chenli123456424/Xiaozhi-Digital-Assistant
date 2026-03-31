@@ -16,6 +16,7 @@ from config import settings
 from llm_wrapper import get_llm
 from services.langgraph_agent import run_agent, stream_agent
 from services.tts_service import generate_audio_async
+from services.memory_service import MemoryManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -300,6 +301,9 @@ async def websocket_chat(websocket: WebSocket):
     await websocket.accept()
     logger.info("[WS] Client connected")
 
+    # 每个连接独立的记忆管理器
+    memory = MemoryManager()
+
     async def safe_send(data: str) -> bool:
         """安全发送，连接已关闭时静默忽略"""
         try:
@@ -347,12 +351,15 @@ async def websocket_chat(websocket: WebSocket):
             logger.info(f"[WS] Received: {message}, lang={tts_lang}")
             stop_flag["stopped"] = False
 
+            # 构建记忆上下文注入 agent
+            memory_context = memory.build_context()
+
             q = queue.Queue()
             loop = asyncio.get_event_loop()
 
             def run_in_thread():
                 try:
-                    for node_name, node_state in stream_agent(message):
+                    for node_name, node_state in stream_agent(message, memory_context):
                         if stop_flag["stopped"]:
                             break
                         q.put(("node", node_name, node_state))
@@ -395,6 +402,11 @@ async def websocket_chat(websocket: WebSocket):
                     break
 
                 if kind == "done":
+                    # 将本轮对话存入记忆
+                    if final_answer and not stop_flag["stopped"]:
+                        memory.add_turn(message, final_answer)
+                        logger.info(f"[Memory] Saved turn, total={len(memory._turns)} turns")
+
                     await safe_send(json.dumps({"type": "done", "data": None}))
                     if final_answer and not stop_flag["stopped"] and tts_enabled:
                         try:

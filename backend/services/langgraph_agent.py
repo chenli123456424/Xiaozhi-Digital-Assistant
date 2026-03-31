@@ -44,6 +44,7 @@ IDENTITY_SYSTEM = (
 class AgentState(TypedDict):
     query: str
     intent: str
+    memory_context: str          # 注入的历史记忆上下文
     thought_process: List[str]
     search_sources: List[dict]   # 真实搜索来源 [{title, url, domain, summary}]
     research_data: dict
@@ -94,12 +95,13 @@ def classifier_node(state: AgentState) -> AgentState:
     query_lower = state["query"].lower()
     is_tech = any(kw.lower() in query_lower for kw in TECH_KEYWORDS)
 
-    # 关键词没命中时，用 LLM 兜底判断
+    # 关键词没命中时，结合记忆上下文用 LLM 兜底判断
     if not is_tech:
         try:
-            prompt = f"""判断以下问题是否与数码产品、电子设备、科技资讯相关。
+            memory_hint = f"\n历史上下文：\n{state['memory_context']}" if state.get("memory_context") else ""
+            prompt = f"""判断以下问题是否与数码产品、电子设备、科技资讯相关。{memory_hint}
 
-问题：{state['query']}
+当前问题：{state['query']}
 
 只回答 "tech" 或 "general"，不要其他内容。"""
             result = _call_llm(prompt).strip().lower()
@@ -118,12 +120,32 @@ def classifier_node(state: AgentState) -> AgentState:
 
 def planner_node(state: AgentState) -> AgentState:
     logger.info(f"[Planner] intent={state['intent']}")
+    memory_context = state.get("memory_context", "")
 
     if state["intent"] == "tech":
+        # 如果有历史上下文，先让 LLM 把模糊问题补全为完整查询词
+        search_query = state["query"]
+        if memory_context:
+            try:
+                expand_prompt = f"""根据历史对话，将用户的当前问题补全为一个完整、明确的搜索查询词。
+
+历史上下文：
+{memory_context}
+
+当前问题：{state['query']}
+
+只输出补全后的查询词（一句话，不超过30字），不要解释。"""
+                expanded = _call_llm(expand_prompt).strip()
+                if expanded and len(expanded) < 60:
+                    search_query = expanded
+                    logger.info(f"[Planner] Query expanded: '{state['query']}' → '{search_query}'")
+            except Exception:
+                pass
+
         try:
             tavily = get_tavily()
             results = tavily.search(
-                query=state["query"],
+                query=search_query,
                 max_results=5,
                 search_depth="basic",
             )
@@ -137,13 +159,13 @@ def planner_node(state: AgentState) -> AgentState:
                 }
                 for r in raw_results
             ]
-            # 让 LLM 综合搜索结果给出分析结论
             snippets = "\n".join(
                 f"[{i+1}] {s['title']} ({s['domain']}): {s['summary']}"
                 for i, s in enumerate(sources)
             )
-            analysis_prompt = f"""根据以下搜索结果，用2-3句话总结关于"{state['query']}"的关键信息：
-
+            memory_hint = f"\n历史上下文：\n{memory_context}\n" if memory_context else ""
+            analysis_prompt = f"""根据以下搜索结果，用2-3句话总结关于"{search_query}"的关键信息：
+{memory_hint}
 {snippets}
 
 只输出总结，不要其他内容。"""
@@ -151,7 +173,7 @@ def planner_node(state: AgentState) -> AgentState:
         except Exception as e:
             logger.warning(f"[Planner] Tavily search failed: {e}")
             sources = []
-            analysis = f"搜索暂时不可用，将基于已有知识回答。"
+            analysis = "搜索暂时不可用，将基于已有知识回答。"
     else:
         sources = []
         analysis = "这是一条通用消息，无需搜索数码资料，直接友好回复即可。"
@@ -252,17 +274,13 @@ def synthesizer_node(state: AgentState) -> AgentState:
     except Exception:
         thoughts_text = ""
 
-    # 构建真实来源列表供 LLM 引用
-    sources = state.get("search_sources", [])
-    sources_text = "\n".join(
-        f"[{i+1}] {s.get('title', '')} - {s.get('url', '')}"
-        for i, s in enumerate(sources)
-    ) if sources else "无真实来源"
+    memory_context = state.get("memory_context", "")
+    memory_section = f"\n历史对话上下文（请结合此上下文理解用户意图）：\n{memory_context}\n" if memory_context else ""
 
     retry_hint = "注意：上一版回答不够具体，请确保包含明确的 CPU 型号和价格数字！" if state["retry_count"] > 0 else ""
 
     prompt = f"""请根据以下研究数据，为用户撰写专业的 Markdown 格式数码评测回答。
-
+{memory_section}
 用户问题：{state['query']}
 分析摘要：{thoughts_text}
 研究数据：{research_json}
@@ -287,8 +305,11 @@ def synthesizer_node(state: AgentState) -> AgentState:
 def general_synthesizer_node(state: AgentState) -> AgentState:
     logger.info("[GeneralSynthesizer] Writing general answer...")
 
-    prompt = f"""用户向你发送了一条消息，请给出友好自然的回复。
+    memory_context = state.get("memory_context", "")
+    memory_section = f"\n历史对话上下文：\n{memory_context}\n" if memory_context else ""
 
+    prompt = f"""用户向你发送了一条消息，请给出友好自然的回复。
+{memory_section}
 用户消息：{state['query']}
 
 要求：
@@ -415,7 +436,7 @@ def run_agent(query: str) -> dict:
     }
 
 
-def stream_agent(query: str):
+def stream_agent(query: str, memory_context: str = ""):
     """
     逐节点 yield 事件，供 SSE 流式推送。
     事件格式：{"event": "node_name", "data": {...}}
@@ -425,6 +446,7 @@ def stream_agent(query: str):
     initial_state = {
         "query":           query,
         "intent":          "",
+        "memory_context":  memory_context,
         "thought_process": [],
         "search_sources":  [],
         "research_data":   {},

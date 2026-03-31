@@ -10,10 +10,10 @@ export default function Header({ onSettingsClick, settingsOpen }) {
     >
       <div className="flex items-center gap-3">
         <div
-          className="w-9 h-9 rounded-xl flex items-center justify-center text-lg"
+          className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden"
           style={{ background: 'linear-gradient(135deg, #1d6fe8, #7c3aed)' }}
         >
-          🤖
+          <img src="/小智数码助手.png" alt="小智" className="w-full h-full object-cover" />
         </div>
         <div>
           <div className="font-bold text-sm leading-tight" style={{ color: theme.text }}>小智数码助手</div>
