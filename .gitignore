@@ -3,6 +3,10 @@
 .env.local
 backend/.env
 
+# 数据库文件
+backend/memory.db
+*.db
+
 # Python
 __pycache__/
 *.py[cod]
