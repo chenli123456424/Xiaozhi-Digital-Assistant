@@ -237,28 +237,28 @@ async def chat_deep(request: ChatRequest):
                 if kind == "done":
                     break
 
-                # ── planner 节点：搜索来源逐条推送 ──
-                if node_name == "planner" and node_state.get("thought_process"):
-                    try:
-                        thought_parsed = json.loads(node_state["thought_process"][0])
-                        sources = thought_parsed.get("sources", [])
-                        analysis = thought_parsed.get("analysis", "")
+                # ── planner 节点：仅做查询词补全，无来源推送 ──
+                if node_name == "planner":
+                    pass  # resolved_query 已写入 state，无需推送
 
-                        # 逐条推送来源（模拟边搜索边显示）
-                        for i, src in enumerate(sources):
-                            source_count = i + 1
-                            yield f'data: {json.dumps({"type": "searching", "count": source_count, "source": src})}\n\n'
-                            await asyncio.sleep(0.15)  # 视觉上有节奏感
-
-                        # 推送分析总结
-                        if analysis:
-                            yield f'data: {json.dumps({"type": "thought_summary", "content": analysis})}\n\n'
-                    except Exception:
-                        pass
-
-                # ── researcher 节点：推送结构化数据 ──
-                elif node_name == "researcher" and node_state.get("research_data"):
-                    yield f'data: {json.dumps({"type": "research", "data": node_state["research_data"]})}\n\n'
+                # ── researcher 节点：推送来源 + 总结 + 结构化数据 ──
+                elif node_name == "researcher":
+                    # 推送来源列表
+                    if node_state.get("thought_process"):
+                        try:
+                            thought_parsed = json.loads(node_state["thought_process"][0])
+                            sources = thought_parsed.get("sources", [])
+                            analysis = thought_parsed.get("analysis", "")
+                            for i, src in enumerate(sources):
+                                yield f'data: {json.dumps({"type": "searching", "count": i + 1, "source": src})}\n\n'
+                                await asyncio.sleep(0.15)
+                            if analysis:
+                                yield f'data: {json.dumps({"type": "thought_summary", "content": analysis})}\n\n'
+                        except Exception:
+                            pass
+                    # 推送结构化数据
+                    if node_state.get("research_data"):
+                        yield f'data: {json.dumps({"type": "research", "data": node_state["research_data"]})}\n\n'
 
                 # ── synthesizer 节点：流式推送最终回答 ──
                 elif node_name == "synthesizer" and node_state.get("draft_content"):
@@ -359,17 +359,26 @@ async def websocket_chat(websocket: WebSocket):
             logger.info(f"[WS] Received: {message}, lang={tts_lang}")
             stop_flag["stopped"] = False
 
-            # 从 DB 构建记忆上下文（在线程池里跑，避免阻塞事件循环）
+            # 三层记忆：生成短期上下文 + 优化搜索词
             loop = asyncio.get_event_loop()
-            memory_context = await loop.run_in_executor(
-                None, build_memory_context, session_id, message
-            )
+            try:
+                short_term_ctx, memory_search_query = await asyncio.wait_for(
+                    loop.run_in_executor(None, build_memory_context, session_id, message),
+                    timeout=12.0
+                )
+                logger.info(f"[WS] Memory search query: '{memory_search_query or '(none)'}', short_term_len={len(short_term_ctx)}")
+            except asyncio.TimeoutError:
+                logger.warning("[WS] Memory context timeout")
+                short_term_ctx, memory_search_query = "", ""
+            except Exception as e:
+                logger.warning(f"[WS] Memory context error: {e}")
+                short_term_ctx, memory_search_query = "", ""
 
             q = queue.Queue()
 
             def run_in_thread():
                 try:
-                    for node_name, node_state in stream_agent(message, memory_context):
+                    for node_name, node_state in stream_agent(message, memory_search_query, short_term_ctx):
                         if stop_flag["stopped"]:
                             break
                         q.put(("node", node_name, node_state))
@@ -413,11 +422,10 @@ async def websocket_chat(websocket: WebSocket):
                     break
 
                 if kind == "done":
-                    # 本轮对话结束，异步写入记忆 DB
                     if final_answer and not stop_flag["stopped"]:
                         await loop.run_in_executor(
                             None, save_turn_memory,
-                            session_id, message, final_resolved, final_answer
+                            session_id, message, final_answer
                         )
                         logger.info(f"[Memory] Turn saved for session {session_id[:8]}…")
 
@@ -434,28 +442,31 @@ async def websocket_chat(websocket: WebSocket):
                             logger.warning(f"[WS] TTS 失败，跳过: {e}")
                     break
 
-                if node_name == "planner" and node_state.get("thought_process"):
-                    # 记录 resolved_query
+                if node_name == "planner":
+                    # 仅记录补全后的查询词，不推送来源（来源由 researcher 产出）
                     final_resolved = node_state.get("resolved_query") or message
-                    try:
-                        thought_parsed = json.loads(node_state["thought_process"][0])
-                        sources = thought_parsed.get("sources", [])
-                        analysis = thought_parsed.get("analysis", "")
-                        for i, src in enumerate(sources):
-                            if stop_flag["stopped"]: break
-                            await safe_send(json.dumps({
-                                "type": "thought", "data": {"count": i + 1, "source": src}
-                            }))
-                            await asyncio.sleep(0.15)
-                        if analysis and not stop_flag["stopped"]:
-                            await safe_send(json.dumps({
-                                "type": "thought_summary", "data": analysis
-                            }))
-                    except Exception:
-                        pass
 
-                elif node_name == "researcher" and node_state.get("research_data"):
-                    if not stop_flag["stopped"]:
+                elif node_name == "researcher":
+                    # 推送来源 + 总结
+                    if node_state.get("thought_process") and not stop_flag["stopped"]:
+                        try:
+                            thought_parsed = json.loads(node_state["thought_process"][0])
+                            sources = thought_parsed.get("sources", [])
+                            analysis = thought_parsed.get("analysis", "")
+                            for i, src in enumerate(sources):
+                                if stop_flag["stopped"]: break
+                                await safe_send(json.dumps({
+                                    "type": "thought", "data": {"count": i + 1, "source": src}
+                                }))
+                                await asyncio.sleep(0.15)
+                            if analysis and not stop_flag["stopped"]:
+                                await safe_send(json.dumps({
+                                    "type": "thought_summary", "data": analysis
+                                }))
+                        except Exception:
+                            pass
+                    # 推送结构化数据
+                    if node_state.get("research_data") and not stop_flag["stopped"]:
                         await safe_send(json.dumps({
                             "type": "search", "data": node_state["research_data"]
                         }))
@@ -467,12 +478,13 @@ async def websocket_chat(websocket: WebSocket):
                     if sources:
                         await safe_send(json.dumps({"type": "sources", "data": sources}))
                     await safe_send(json.dumps({"type": "content_reset", "data": None}))
-                    for i in range(0, len(answer), 8):
+                    # 每次推送 50 个字符，减少消息数量降低丢包风险
+                    for i in range(0, len(answer), 50):
                         if stop_flag["stopped"]: break
                         await safe_send(json.dumps({
-                            "type": "content_patch", "data": answer[i:i + 8]
+                            "type": "content_patch", "data": answer[i:i + 50]
                         }))
-                        await asyncio.sleep(0.01)
+                        await asyncio.sleep(0.02)
 
                 elif node_name == "critic":
                     retry_count = node_state.get("retry_count", 0)

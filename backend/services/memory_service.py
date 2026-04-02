@@ -1,23 +1,32 @@
 """
-对话记忆管理服务 v2 — SQLite 持久化版
-流程：
-  1. 每轮对话开始前：load_memories → build_context_from_db（梳理历史 + 推理当前问题关联）
-  2. 每轮对话结束后：LLM 提炼本轮摘要 → save_memory 写入 DB
+三层记忆服务
+
+写入（每轮对话结束后）：
+  - 短期：原文存内存
+  - 中期：LLM 提炼摘要存 SQLite
+  - 长期：摘要存 Chroma 向量库
+
+读取（每轮对话开始前）：
+  1. 短期记忆：直接取最近几轮完整对话注入 prompt，最准确
+  2. 中期记忆：取最近一条摘要，LLM 判断是否是追问，生成搜索词
+  3. 长期记忆：向量检索语义相关历史，LLM 生成搜索词
+  4. 都无关：返回空，走正常工作流
 """
 import logging
-import json
-from typing import List
+import uuid
 import dashscope
 from dashscope import Generation
 
 from config import settings
-from services.memory_db import save_memory, load_memories, get_turn_count, init_db
+from services.memory_db import (
+    add_short_term, get_short_term,
+    save_mid_term, load_last_mid_term, load_all_mid_term,
+    save_long_term, search_long_term,
+    init_db,
+)
 
 logger = logging.getLogger(__name__)
 dashscope.api_key = settings.dashscope_api_key
-
-# 每次注入 prompt 的最大历史条数（避免 token 过多）
-MAX_CONTEXT_TURNS = 10
 
 
 def _call_llm(prompt: str) -> str:
@@ -33,92 +42,93 @@ def _call_llm(prompt: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# 记忆写入：每轮对话结束后调用
+# 写入：每轮对话结束后调用
 # ─────────────────────────────────────────────
 
-def save_turn_memory(session_id: str, user_query: str,
-                     resolved_query: str, assistant_reply: str):
-    """
-    调用 LLM 对本轮对话提炼摘要和关键词，写入 DB。
-    异步友好：调用方用 run_in_executor 包裹即可。
-    """
-    turn_index = get_turn_count(session_id) + 1
+def save_turn_memory(session_id: str, user_query: str, assistant_reply: str):
+    # 短期：原文存内存
+    add_short_term(session_id, user_query, assistant_reply)
 
-    prompt = f"""请对以下一轮对话进行关键信息提炼，输出 JSON。
-
-用户问题：{user_query}
-实际查询主题：{resolved_query}
-AI 回复摘要（取前600字）：{assistant_reply[:600]}
-
-输出 JSON（只输出 JSON，不要其他文字）：
-{{
-  "summary": "本轮对话的核心信息，不超过150字，保留产品名/价格/参数/结论等关键实体",
-  "keywords": ["关键词1", "关键词2", "关键词3"]
-}}"""
-
+    # 中期 + 长期：LLM 提炼摘要
+    prompt = (
+        "请根据以下 AI 回答内容，提炼出核心信息摘要，不超过150字。\n"
+        "要求：保留关键的产品名、参数、价格、结论等实体信息，语言简洁。\n"
+        "只输出摘要文字，不要任何标题或解释。\n\n"
+        "AI 回答全文：\n" + assistant_reply
+    )
     try:
-        raw = _call_llm(prompt)
-        if raw.startswith("```"):
-            raw = raw.split("```")[1].lstrip("json").strip()
-        data = json.loads(raw)
-        summary = data.get("summary", "")
-        keywords = data.get("keywords", [])
+        summary = _call_llm(prompt)
     except Exception as e:
-        logger.warning(f"[Memory] LLM summarize failed: {e}, using fallback")
-        summary = f"用户问：{user_query}。主题：{resolved_query}。"
-        keywords = []
+        logger.warning(f"[Memory] Summarize failed: {e}")
+        summary = assistant_reply[:150]
 
-    save_memory(session_id, turn_index, user_query, resolved_query, summary, keywords)
+    # 中期存 SQLite
+    save_mid_term(session_id, user_query, summary)
+
+    # 长期存 Chroma
+    doc_id = f"{session_id}_{uuid.uuid4().hex[:8]}"
+    save_long_term(session_id, user_query, summary, doc_id)
+    logger.info(f"[Memory] Saved all layers for session {session_id[:8]}…")
 
 
 # ─────────────────────────────────────────────
-# 记忆读取：每轮对话开始前调用
+# 读取：每轮对话开始前调用
+# 返回 (short_term_context, search_query)
+#   short_term_context: 注入 prompt 的短期对话原文（可能为空）
+#   search_query: 优化后的搜索词（空字符串表示走正常流程）
 # ─────────────────────────────────────────────
 
-def build_memory_context(session_id: str, current_query: str) -> str:
+def build_memory_context(session_id: str, current_query: str):
     """
-    从 DB 加载历史记忆，让 LLM 梳理后生成注入 prompt 的上下文字符串。
-    包含：历史摘要列表 + 对当前问题的关联推理。
+    返回 (short_term_context: str, search_query: str)
     """
-    memories = load_memories(session_id, limit=MAX_CONTEXT_TURNS)
-    if not memories:
-        return ""
+    # ── 短期记忆：直接取最近几轮完整对话 ──
+    short_turns = get_short_term(session_id)
+    short_term_context = ""
+    if short_turns:
+        lines = []
+        for t in short_turns:
+            lines.append(f"用户：{t['user_query']}")
+            lines.append(f"助手：{t['assistant_reply'][:200]}")  # 截取前200字避免过长
+        short_term_context = "\n".join(lines)
 
-    # 构建历史摘要列表文本
-    history_lines = []
-    for m in memories:
-        kw_str = "、".join(json.loads(m["keywords"])) if m.get("keywords") else ""
-        line = f"第{m['turn_index']}轮 [{kw_str}]：{m['summary']}"
-        history_lines.append(line)
-    history_text = "\n".join(history_lines)
+    # ── 中期 + 长期记忆：合并为一次 LLM 调用 ──
+    last = load_last_mid_term(session_id)
+    long_results = search_long_term(current_query, session_id) if last is None else []
 
-    # 让 LLM 推理当前问题与历史的关联，生成精炼上下文
-    prompt = f"""以下是用户与小智数码助手的历史对话摘要列表：
+    # 先用中期，如果中期存在就不查长期；中期不存在才查长期
+    if last is None:
+        long_results = search_long_term(current_query, session_id)
 
-{history_text}
-
-用户当前提问：{current_query}
-
-请完成两件事：
-1. 判断当前问题是否与历史对话有关联（如指代词"他/它/那个"、追问、对比等）
-2. 输出一段简洁的上下文说明（不超过200字），供 AI 理解当前问题的完整背景
-
-只输出上下文说明文字，不要标题或编号。如果当前问题与历史完全无关，输出"无相关历史上下文"。"""
-
-    try:
-        context = _call_llm(prompt)
-        if context == "无相关历史上下文":
-            # 无关联时仍保留最近几轮的原始摘要，供 LLM 参考
-            recent = memories[-3:]
-            context = "近期对话摘要：\n" + "\n".join(
-                f"第{m['turn_index']}轮：{m['summary']}" for m in recent
-            )
-        logger.info(f"[Memory] Context built for session {session_id[:8]}…")
-        return context
-    except Exception as e:
-        logger.warning(f"[Memory] Context build failed: {e}")
-        # 降级：直接返回最近3轮摘要
-        recent = memories[-3:]
-        return "近期对话摘要：\n" + "\n".join(
-            f"第{m['turn_index']}轮：{m['summary']}" for m in recent
+    context_parts = []
+    if last:
+        context_parts.append(
+            "最近一轮对话：\n提问：" + last["user_query"] + "\n摘要：" + last["summary"]
         )
+    if long_results:
+        history_text = "\n".join(
+            f"提问：{m['user_query']} / 摘要：{m['summary']} (相似度:{m['score']:.2f})"
+            for m in long_results
+        )
+        context_parts.append("语义相关历史：\n" + history_text)
+
+    if context_parts:
+        prompt = (
+            "\n\n".join(context_parts) + "\n\n"
+            "短期对话原文（最近几轮）：\n" + (short_term_context or "无") + "\n\n"
+            "用户当前提问：" + current_query + "\n\n"
+            "判断当前提问是否是上述对话的追问或延续（含指代词/追问细节/区别/对比/相关话题等）。\n"
+            "如果是，结合具体的产品名/主题生成完整的搜索词（不超过20字，必须包含具体产品名或主题）。\n"
+            "如果完全无关，输出：UNRELATED\n"
+            "只输出搜索词或UNRELATED。"
+        )
+        try:
+            result = _call_llm(prompt).strip().strip('"').strip("'")
+            if result and "UNRELATED" not in result.upper() and len(result) < 60:
+                logger.info(f"[Memory] Memory hit: '{current_query}' → '{result}'")
+                return short_term_context, result
+        except Exception as e:
+            logger.warning(f"[Memory] Memory check failed: {e}")
+
+    logger.info(f"[Memory] No relevant memory for: {current_query}")
+    return short_term_context, ""

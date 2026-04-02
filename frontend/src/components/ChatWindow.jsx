@@ -11,15 +11,18 @@ const INITIAL_MESSAGES = [
 
 export default function ChatWindow() {
   const { theme } = useTheme()
-  const { isSpeaking, setIsSpeaking, ttsLang, ttsEnabled, setTtsEnabled, audioObjRef, stopAudio } = useSpeaking()
+  const { isSpeaking, setIsSpeaking, speakingMessageId, setSpeakingMessageId, ttsLang, ttsEnabled, setTtsEnabled, audioObjRef, stopAudio } = useSpeaking()
   const ttsLangRef = useRef(ttsLang)
-  ttsLangRef.current = ttsLang  // 每次渲染都更新 ref
+  ttsLangRef.current = ttsLang
+  const setSpeakingMessageIdRef = useRef(setSpeakingMessageId)
+  setSpeakingMessageIdRef.current = setSpeakingMessageId
   const [messages, setMessages] = useState(INITIAL_MESSAGES)
   const [loading, setLoading] = useState(false)
   const [wsStatus, setWsStatus] = useState('disconnected')
   const messagesEndRef = useRef(null)
   const wsRef = useRef(null)
   const activeIdRef = useRef(null)
+  const lastAssistantIdRef = useRef(null)
   // 用 ref 保存 setIsSpeaking，避免 WebSocket 闭包捕获旧引用
   const setIsSpeakingRef = useRef(setIsSpeaking)
   setIsSpeakingRef.current = setIsSpeaking
@@ -28,23 +31,28 @@ export default function ChatWindow() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const playAudio = (base64Data) => {
+  const playAudio = (base64Data, messageId) => {
     try {
       const bytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0))
       const blob = new Blob([bytes], { type: 'audio/mp3' })
       const url = URL.createObjectURL(blob)
       const audio = new Audio(url)
-      audioObjRef.current = audio  // 存引用，供外部控制
+      audioObjRef.current = audio
       audio.play()
-        .then(() => setIsSpeakingRef.current(true))
+        .then(() => {
+          setIsSpeakingRef.current(true)
+          setSpeakingMessageIdRef.current(messageId)
+        })
         .catch(e => console.error('[Audio] 播放被阻止:', e))
       audio.onended = () => {
         setIsSpeakingRef.current(false)
+        setSpeakingMessageIdRef.current(null)
         audioObjRef.current = null
         URL.revokeObjectURL(url)
       }
       audio.onerror = () => {
         setIsSpeakingRef.current(false)
+        setSpeakingMessageIdRef.current(null)
         audioObjRef.current = null
       }
     } catch (e) {
@@ -114,6 +122,7 @@ export default function ChatWindow() {
       setMessages(prev => prev.map(m =>
         m.id === activeIdRef.current ? { ...m, thinking: false } : m
       ))
+      lastAssistantIdRef.current = activeIdRef.current
       activeIdRef.current = null
       setLoading(false)
     },
@@ -126,8 +135,7 @@ export default function ChatWindow() {
       setLoading(false)
     },
     onAudio: (base64Data) => {
-      // 通过 ref 调用，确保拿到最新的 playAudio
-      playAudioRef.current(base64Data)
+      playAudioRef.current(base64Data, lastAssistantIdRef.current)
     },
   })
 

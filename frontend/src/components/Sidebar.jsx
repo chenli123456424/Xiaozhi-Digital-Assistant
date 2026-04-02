@@ -27,7 +27,7 @@ export default function Sidebar({ settingsOpen, onCloseSettings }) {
           className="flex flex-col items-center justify-center rounded-2xl relative overflow-hidden"
           style={{
             width: '85%',
-            height: '420px',
+            height: '560px',
             background: theme.avatarBg,
             border: `1px solid ${isSpeaking ? '#1d6fe8' : theme.avatarBorder}`,
             transition: 'border-color 0.3s',

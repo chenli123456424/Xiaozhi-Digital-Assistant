@@ -85,7 +85,7 @@ export class ChatWebSocket {
       case 'done':            this.handlers.onDone?.();               break
       case 'stopped':         this.handlers.onStopped?.();            break
       case 'audio':           
-        this.handlers.onAudio?.(msg.data, msg.lang)
+        this.handlers.onAudio?.(data)
         break
       case 'error':           this.handlers.onError?.(data);          break
       default: console.warn('[WS] Unknown type:', type)

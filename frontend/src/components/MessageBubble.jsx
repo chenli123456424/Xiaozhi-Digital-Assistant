@@ -179,8 +179,9 @@ function ResearchPanel({ data, theme }) {
 
 export default function MessageBubble({ message }) {
   const { theme } = useTheme()
-  const { isSpeaking, stopAudio } = useSpeaking()
+  const { isSpeaking, speakingMessageId, stopAudio } = useSpeaking()
   const isUser = message.type === 'user'
+  const isThisMessageSpeaking = isSpeaking && speakingMessageId === message.id
 
   if (isUser) {
     return (
@@ -197,7 +198,7 @@ export default function MessageBubble({ message }) {
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-xl w-full">
+      <div className="max-w-none w-full pr-2">
         {/* 思考链面板 */}
         <ThoughtPanel message={message} theme={theme} />
 
@@ -206,7 +207,7 @@ export default function MessageBubble({ message }) {
 
         {/* 主回答气泡 */}
         <div
-          className="relative px-4 py-3 rounded-2xl rounded-bl-sm text-sm leading-relaxed"
+          className="relative px-4 py-3 rounded-2xl rounded-bl-sm text-base leading-relaxed"
           style={{
             background: message.error ? (theme.card === '#ffffff' ? '#fff0f0' : '#2d1b1b') : theme.card,
             color: message.error ? '#f85149' : theme.text,
@@ -270,7 +271,7 @@ export default function MessageBubble({ message }) {
           {/* 朗读控制按钮 - 右下角 */}
           {!message.thinking && !message.error && message.content && (
             <div className="flex justify-end mt-2">
-              {isSpeaking ? (
+              {isThisMessageSpeaking ? (
                 <button
                   onClick={stopAudio}
                   className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs transition-all"

@@ -4,10 +4,11 @@ export const SpeakingContext = createContext()
 
 export function SpeakingProvider({ children }) {
   const [isSpeaking, setIsSpeaking] = useState(false)
+  const [speakingMessageId, setSpeakingMessageId] = useState(null)  // 当前朗读的消息 id
   const [ttsLang, setTtsLang] = useState('zh')
   const [ttsEnabled, setTtsEnabled] = useState(true)
-  const audioRef = useRef(null)        // 当前播放的 Audio 对象
-  const audioObjRef = useRef(null)     // 用于暂停/继续控制
+  const audioRef = useRef(null)
+  const audioObjRef = useRef(null)
 
   const stopAudio = () => {
     if (audioObjRef.current) {
@@ -16,11 +17,13 @@ export function SpeakingProvider({ children }) {
       audioObjRef.current = null
     }
     setIsSpeaking(false)
+    setSpeakingMessageId(null)
   }
 
   return (
     <SpeakingContext.Provider value={{
       isSpeaking, setIsSpeaking,
+      speakingMessageId, setSpeakingMessageId,
       ttsLang, setTtsLang,
       ttsEnabled, setTtsEnabled,
       audioRef, audioObjRef,

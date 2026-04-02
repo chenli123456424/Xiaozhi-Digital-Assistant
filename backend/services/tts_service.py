@@ -145,7 +145,7 @@ async def _synthesize_segment(text: str, voice: str, token: str) -> Optional[str
                 return None
             return data.get("data")
     except Exception as e:
-        logger.error(f"[TTS] 段合成异常: {e}")
+        logger.error(f"[TTS] 段合成异常: {type(e).__name__}: {e}")
         return None
 
 

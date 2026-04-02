@@ -48,7 +48,7 @@ export const themes = {
 }
 
 export function ThemeProvider({ children }) {
-  const [mode, setMode] = useState('dark')
+  const [mode, setMode] = useState('dark') 
   const toggle = () => setMode(m => m === 'dark' ? 'light' : 'dark')
   return (
     <ThemeContext.Provider value={{ theme: themes[mode], mode, toggle }}>
